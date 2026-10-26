@@ -11,7 +11,7 @@ Monocular Visual SLAM engine built from scratch in Python and OpenCV. Estimates 
 - **Trajectory Evaluation**: Closed-form Umeyama Sim(3) alignment against TUM RGB-D ground truth, computing Absolute Trajectory Error (ATE RMSE).
 
 ## Project Layout
-`	ext
+```
 week1/
 |-- datasets/             # Dataset loaders (Synthetic, TUM RGB-D, KITTI, Video, Images)
 |-- slam/
