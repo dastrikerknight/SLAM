@@ -1,6 +1,6 @@
 # Monocular Visual SLAM & Dense 3D Reconstruction - Week 2
 
-Production-grade Visual SLAM system featuring Guided Epipolar Line Search, continuous local map inlier replenishment (0 lost frames), covisibility loop landmark fusion, and high-resolution dense 3D scene reconstruction.
+Visual SLAM system featuring Epipolar Line Search, continuous local map inlier(0 lost frames), covisibility loop landmark, and high-resolution dense 3D scene reconstruction.
 
 ## Key Upgrades over Week 1
 
@@ -10,7 +10,7 @@ Production-grade Visual SLAM system featuring Guided Epipolar Line Search, conti
 | **Tracking Inlier Retention** | KLT drops to 20-30 points | **Local Map Point Injection ($120+$ tracked inliers, 0 lost frames)** |
 | **Loop Landmark Fusion** | None | **Covisibility Loop Landmark Merging ($\ge 30$ KF baseline)** |
 | **3D Reconstruction** | Sparse feature points | **Multi-view Dense 3D Reconstruction (`dense_reconstruction.py`)** |
-| **ATE RMSE Accuracy** | ~14.6 cm | **~4.1 cm (over 70% reduction in error)** |
+| **ATE RMSE Accuracy** | ~14.6 cm | **~4.1 cm (70% reduction in error)** |
 | **Processing Speed** | 2.5 FPS | **16 FPS real-time** |
 
 ## Project Layout
