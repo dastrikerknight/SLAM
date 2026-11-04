@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.ply
+*.obj
+*.mp4
+*.bin
+*.txt
+!requirements.txt
+!trajectory_tum.txt
+.DS_Store
+.idea/
+.vscode/
+reconstructed_*/
+test_output*/
