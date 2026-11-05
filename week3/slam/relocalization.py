@@ -1,3 +1,5 @@
+"""Kidnapped robot relocalization via visual vocabulary and PnP-RANSAC."""
+
 from typing import Optional, Tuple
 import numpy as np
 import cv2
@@ -7,6 +9,7 @@ from slam.map import Map
 from slam.camera import Camera
 from slam.bow_vocabulary import VisualVocabulary, InvertedIndex
 from slam.feature_tracker import FeatureTracker
+
 
 class Relocalizer:
     def __init__(
@@ -36,13 +39,13 @@ class Relocalizer:
         if curr_frame.des is None or len(curr_frame.des) < 20:
             return False
 
-        # If vocab is trained, query candidates with visual word similarity
+        # try fast BoW query first if vocabulary is ready
         candidates = []
         if vocab.is_trained():
             bow_vec = vocab.transform(curr_frame.des)
             candidates = [cid for cid, _ in index.query(bow_vec, min_score=0.15, top_k=4)]
 
-        # Fallback to keyframes with highest landmark count if index returns few
+        # fallback: try keyframes holding the most 3D points if BoW has low coverage
         if len(candidates) < 2:
             sorted_kfs = sorted(slam_map.keyframes.values(), key=lambda k: k.count_tracked_points(), reverse=True)
             for kf in sorted_kfs[:4]:

@@ -1,15 +1,23 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.ply
-*.obj
-*.mp4
-*.bin
-*.txt
-!requirements.txt
-!trajectory_tum.txt
 .DS_Store
 .idea/
 .vscode/
 reconstructed_*/
 test_output*/
+
+# Ignore ad-hoc temporary binary runs in root
+*.ply
+*.obj
+*.mp4
+*.bin
+*.txt
+
+# Whitelist repo deliverables and configs
+!requirements.txt
+!outputs/
+!outputs/**
+!slam_output_3d.png
+!slam_evaluation.png
+!cinematic_orbit_showcase.png

@@ -1,8 +1,4 @@
-"""
-Visual Odometry and Tracking engine for Monocular Visual SLAM.
-Features hybrid Pyramidal KLT Optical Flow for fast, continuous frame-to-frame tracking,
-ORB descriptor matching for relocalization, and robust PnP-RANSAC pose estimation.
-"""
+"""Frame-to-frame tracking with KLT optical flow, motion model, and PnP-RANSAC."""
 
 from enum import Enum
 from typing import Optional, List, Tuple
@@ -51,17 +47,16 @@ class Tracking:
 
         self.state = TrackingState.NOT_INITIALIZED
 
-        # Frames history
+        # frame history
         self.init_reference_frame: Optional[Frame] = None
         self.last_frame: Optional[Frame] = None
         self.current_frame: Optional[Frame] = None
         self.last_keyframe: Optional[Frame] = None
 
-        # Motion model (relative pose T_curr_prev = T_cw_curr @ T_cw_prev^-1)
+        # motion model
         self.velocity = np.eye(4, dtype=np.float64)
         self.has_velocity = False
 
-        # Stats
         self.num_inliers = 0
         self.frames_since_kf = 0
 
@@ -72,10 +67,6 @@ class Tracking:
         image: np.ndarray,
         depth: Optional[np.ndarray] = None
     ) -> Frame:
-        """
-        Processes an incoming video frame.
-        Executes hybrid KLT optical flow, PnP tracking, or initialization.
-        """
         self.current_frame = Frame(frame_id, timestamp, image, self.camera, depth=depth)
 
         if self.state == TrackingState.NOT_INITIALIZED:
@@ -92,11 +83,10 @@ class Tracking:
         return self.current_frame
 
     def _handle_initialization(self) -> None:
-        """Attempts initialization: RGB-D direct metric seeding if depth available, else monocular."""
         kps, des = self.feature_tracker.detect_and_compute(self.current_frame.image)
         self.current_frame.set_features(kps, des)
 
-        # 1. RGB-D Direct Metric Initialization
+        # direct metric seed from depth map if available
         if self.current_frame.depth is not None:
             self.current_frame.set_pose(np.eye(4, dtype=np.float64))
             h, w = self.current_frame.depth.shape[:2]
@@ -133,7 +123,7 @@ class Tracking:
                 print(f"[SLAM Initializer] Success! RGB-D metric map initialized with {valid_count} MapPoints on frame {self.current_frame.id}.")
                 return
 
-        # 2. Monocular two-view fallback
+        # mono 2-view init fallback
         if self.init_reference_frame is None:
             if self.current_frame.num_features >= 50:
                 self.init_reference_frame = self.current_frame
@@ -163,13 +153,9 @@ class Tracking:
                 self.init_reference_frame = self.current_frame
 
     def _track_frame(self) -> None:
-        """
-        Tracks current frame using Pyramidal KLT Optical Flow on MapPoints,
-        followed by PnP-RANSAC pose estimation.
-        """
         self.frames_since_kf += 1
 
-        # 1. Gather all active MapPoint observations from last frame
+        # gather active landmarks from last frame
         last_pts_3d = []
         last_pts_2d = []
         last_mps = []
@@ -184,7 +170,7 @@ class Tracking:
         tracked_2d = []
         tracked_mps = []
 
-        # 2. Pyramidal KLT Optical Flow tracking
+        # optical flow tracking
         if len(last_pts_2d) > 0:
             last_pts_arr = np.array(last_pts_2d, dtype=np.float32)
             curr_pts_arr, valid_klt = self.feature_tracker.track_klt(
@@ -200,7 +186,7 @@ class Tracking:
                     tracked_2d.append(curr_pts_arr[i])
                     tracked_mps.append(last_mps[i])
 
-        # 3. Fallback: If KLT points are low, supplement with ORB descriptor matching across recent keyframes
+        # if optical flow lost too many points, pull ORB matches from recent keyframes
         if len(tracked_3d) < 50 and len(self.slam_map.keyframes) > 0:
             kps_orb, des_orb = self.feature_tracker.detect_and_compute(self.current_frame.image)
             self.current_frame.set_features(kps_orb, des_orb)
@@ -228,7 +214,7 @@ class Tracking:
         pts_3d = np.array(tracked_3d, dtype=np.float64)
         pts_2d = np.array(tracked_2d, dtype=np.float32)
 
-        # 4. Motion model extrinsic guess
+        # motion model gives PnP an initial starting guess
         use_extrinsic_guess = False
         rvec_init = np.zeros((3, 1), dtype=np.float64)
         tvec_init = np.zeros((3, 1), dtype=np.float64)
@@ -241,7 +227,7 @@ class Tracking:
             tvec_init = t_pred
             use_extrinsic_guess = True
 
-        # 5. PnP-RANSAC
+        # PnP-RANSAC pose solve
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
             pts_3d,
             pts_2d,
@@ -257,7 +243,6 @@ class Tracking:
         )
 
         if not success or inliers is None or len(inliers) < self.min_inliers_pnp:
-            # Fallback retry with slightly relaxed threshold before declaring tracking lost
             success, rvec, tvec, inliers = cv2.solvePnPRansac(
                 pts_3d,
                 pts_2d,
@@ -286,18 +271,16 @@ class Tracking:
         R, _ = cv2.Rodrigues(rvec)
         self.current_frame.set_R_t(R, tvec)
 
-        # Update velocity model
         if self.last_frame.has_pose:
             T_curr = self.current_frame.get_pose()
             T_last_inv = self.last_frame.get_inverse_pose()
             self.velocity = T_curr @ T_last_inv
             self.has_velocity = True
 
-        # Register tracked inliers in current frame
         inlier_kps = [cv2.KeyPoint(x=float(pts_2d[i, 0]), y=float(pts_2d[i, 1]), size=31.0) for i in inliers]
         inlier_mps = [tracked_mps[i] for i in inliers]
 
-        # Use the MapPoints' existing representative descriptors (safe, zero-overhead, no dropped points)
+        # reuse representative descriptors to avoid expensive recomputation
         inlier_des_list = []
         for mp in inlier_mps:
             if mp.descriptor is not None and len(mp.descriptor) == 32:
@@ -308,22 +291,19 @@ class Tracking:
         inlier_des = np.array(inlier_des_list, dtype=np.uint8) if inlier_des_list else np.empty((0, 32), dtype=np.uint8)
         self.current_frame.set_features(inlier_kps, inlier_des, inlier_mps)
 
-        # Link observations to MapPoints
         for idx, mp in enumerate(inlier_mps):
             mp.add_observation(self.current_frame.id, idx)
             mp.num_found += 1
 
         self.num_inliers = len(inliers)
 
-        # Project local map points to replenish tracks and prevent track starvation
+        # project nearby map points to replenish tracks before starvation
         self._track_local_map(R, tvec, inlier_mps)
 
-        # 6. Check KeyFrame insertion
         if self._should_insert_keyframe():
             self._insert_keyframe()
 
     def _should_insert_keyframe(self) -> bool:
-        """Determines if current frame should become a KeyFrame."""
         if self.last_keyframe is None:
             return True
 
@@ -347,7 +327,6 @@ class Tracking:
         if dist > 0.08:
             return True
 
-        # Significant rotation
         R_rel = self.current_frame.get_rotation() @ self.last_keyframe.get_rotation().T
         angle = np.degrees(np.arccos(np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)))
         if angle > 7.0:
@@ -356,8 +335,6 @@ class Tracking:
         return False
 
     def _insert_keyframe(self) -> None:
-        """Adds current frame as KeyFrame, replenishes features, and executes local mapping."""
-        # Detect new features in unrepresented image regions
         new_kps, new_des = self.feature_tracker.detect_new_features(
             self.current_frame.gray,
             self.current_frame.kps_pts,
@@ -367,7 +344,6 @@ class Tracking:
         if new_kps:
             self.current_frame.add_features(new_kps, new_des)
 
-        # In RGB-D mode: instantiate true metric 3D landmarks for unassociated keypoints
         if self.current_frame.depth is not None and self.current_frame.has_pose:
             T_wc = self.current_frame.get_inverse_pose()
             R_wc = T_wc[:3, :3]
@@ -401,107 +377,26 @@ class Tracking:
         self.last_keyframe = self.current_frame
         self.frames_since_kf = 0
 
-        # Trigger local mapping
         self.local_mapping.process_new_keyframe(self.current_frame, self.slam_map)
 
     def _try_relocalization(self) -> None:
-        """Attempts relocalization against keyframes."""
         self.state = TrackingState.LOST
         self.has_velocity = False
 
     def _handle_lost(self) -> None:
-        """
-        Global relocalization searching across all keyframes in the map.
-        Restores tracking when camera re-enters known territory.
-        """
-        if len(self.slam_map.keyframes) == 0:
+        if not self.slam_map.keyframes:
             return
 
-        # 1. Fast Bag of Visual Words relocalization
         vocab = self.local_mapping.loop_closing.vocab
         index = self.local_mapping.loop_closing.index
         if self.relocalizer.relocalize(self.current_frame, self.slam_map, vocab, index):
             self.state = TrackingState.OK
             self.num_inliers = self.current_frame.count_tracked_points()
-            self.last_keyframe = self.slam_map.keyframes.get(max(self.slam_map.keyframes.keys()))
+            self.last_keyframe = self.slam_map.keyframes[max(self.slam_map.keyframes.keys())]
             self.frames_since_kf = 0
-            print(f"[Relocalize] Successfully recovered pose at frame {self.current_frame.id} via visual vocabulary!")
-            return
-
-        # Ensure current frame has ORB features extracted
-        if self.current_frame.num_features < 50:
-            kps, des = self.feature_tracker.detect_and_compute(self.current_frame.image)
-            self.current_frame.set_features(kps, des)
-
-        if len(self.current_frame.des) == 0:
-            return
-
-        # Search keyframes, prioritizing those with highest point counts
-        kfs_sorted = sorted(
-            self.slam_map.keyframes.values(),
-            key=lambda kf: kf.count_tracked_points(),
-            reverse=True
-        )
-
-        for kf in kfs_sorted:
-            if kf.des is None or len(kf.des) < 20:
-                continue
-
-            matches = self.feature_tracker.match_features(
-                kf.des,
-                self.current_frame.des,
-                ratio_thresh=0.85
-            )
-
-            if len(matches) < self.min_inliers_pnp:
-                continue
-
-            pts_3d = []
-            pts_2d = []
-            match_pairs = []
-
-            for m_kf, m_curr, _ in matches:
-                mp = kf.map_points[m_kf]
-                if mp is not None and not mp.is_bad and not kf.outliers[m_kf]:
-                    pts_3d.append(mp.point_3d)
-                    pts_2d.append(self.current_frame.kps_pts[m_curr])
-                    match_pairs.append((m_curr, mp))
-
-            if len(pts_3d) >= self.min_inliers_pnp:
-                success, rvec, tvec, inliers = cv2.solvePnPRansac(
-                    np.array(pts_3d, dtype=np.float64),
-                    np.array(pts_2d, dtype=np.float32),
-                    self.camera.K,
-                    None,
-                    iterationsCount=300,
-                    reprojectionError=4.0,
-                    confidence=0.99
-                )
-
-                if success and inliers is not None and len(inliers) >= self.min_inliers_pnp:
-                    R, _ = cv2.Rodrigues(rvec)
-                    self.current_frame.set_R_t(R, tvec)
-
-                    inlier_indices = inliers.flatten()
-                    for idx in inlier_indices:
-                        m_curr, mp = match_pairs[idx]
-                        self.current_frame.associate_map_point(m_curr, mp)
-
-                    self.state = TrackingState.OK
-                    self.num_inliers = len(inlier_indices)
-                    self.last_keyframe = kf
-                    self.frames_since_kf = 0
-                    print(f"[SLAM Relocalization] Successfully relocalized at frame {self.current_frame.id} with {len(inlier_indices)} inliers against KeyFrame {kf.id}!")
-                    self.local_mapping.triangulate_with_keyframe(kf, self.current_frame, self.slam_map)
-                    self.slam_map.add_keyframe(self.current_frame)
-                    self._track_local_map(R, tvec, [match_pairs[idx][1] for idx in inlier_indices])
-                    return
+            print(f"[Relocalize] Recovered pose at frame {self.current_frame.id} via visual vocabulary")
 
     def _track_local_map(self, R: np.ndarray, tvec: np.ndarray, inlier_mps: List[MapPoint]) -> None:
-        """
-        Projects local 3D MapPoints from recent keyframes into the current frame.
-        Maintains a dense set of tracked inliers (80-120+ points) to prevent track starvation.
-        """
         if len(self.slam_map.keyframes) < 2:
             return
 

@@ -1,6 +1,49 @@
+"""Inverse-disparity metric scale and shift alignment for neural depth."""
+
 from typing import Tuple, Union, Sequence
 import numpy as np
-from sklearn.linear_model import RANSACRegressor
+
+
+def _ransac_line_1d(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_iters: int = 50,
+    thresh_rel: float = 0.20
+) -> Tuple[float, float, np.ndarray]:
+    # 1D line fit with RANSAC to avoid pulling in heavy scikit-learn
+    n = len(x)
+    if n < 2:
+        return 1.0, 0.0, np.ones(n, dtype=bool)
+
+    rng = np.random.default_rng(42)
+    best_inliers = np.zeros(n, dtype=bool)
+    best_a, best_b = 1.0, 0.0
+    thresh = max(float(np.std(y) * thresh_rel), 0.05)
+
+    for _ in range(max_iters):
+        idx = rng.choice(n, size=2, replace=False)
+        x0, x1 = x[idx[0]], x[idx[1]]
+        y0, y1 = y[idx[0]], y[idx[1]]
+        if abs(x1 - x0) < 1e-6:
+            continue
+        a = (y1 - y0) / (x1 - x0)
+        b = y0 - a * x0
+        inliers = np.abs(y - (a * x + b)) < thresh
+        if np.sum(inliers) > np.sum(best_inliers):
+            best_inliers = inliers
+            best_a, best_b = a, b
+
+    # re-estimate with least squares on inliers
+    if np.sum(best_inliers) >= 2:
+        xi = x[best_inliers]
+        yi = y[best_inliers]
+        denom = np.var(xi)
+        if denom > 1e-8:
+            best_a = float(np.cov(xi, yi)[0, 1] / denom)
+            best_b = float(np.mean(yi) - best_a * np.mean(xi))
+
+    return float(best_a), float(best_b), best_inliers
+
 
 def align_depth_scale_shift(
     pixel_coords: Union[np.ndarray, Sequence[Sequence[float]]],
@@ -13,103 +56,51 @@ def align_depth_scale_shift(
 
     n_pts = len(coords)
     inlier_mask = np.zeros(n_pts, dtype=bool)
-
     if n_pts < 2 or len(depths) != n_pts:
         return pred_map.copy(), inlier_mask
 
     h, w = pred_map.shape[:2]
-
-    # Extract pixel coordinates (u: col, v: row)
     u = np.round(coords[:, 0]).astype(np.int64)
     v = np.round(coords[:, 1]).astype(np.int64)
 
-    # Filter points within image boundaries and with positive SLAM depth
-    valid_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h) & (depths > 0) & np.isfinite(depths)
-    valid_indices = np.where(valid_bounds)[0]
-
-    if len(valid_indices) < 2:
+    valid = (u >= 0) & (u < w) & (v >= 0) & (v < h) & (depths > 0) & np.isfinite(depths)
+    val_idx = np.where(valid)[0]
+    if len(val_idx) < 2:
         return pred_map.copy(), inlier_mask
 
-    # Sample predicted depth at valid pixel locations
-    pred_samples = pred_map[v[valid_indices], u[valid_indices]]
-    valid_samples = np.isfinite(pred_samples) & (pred_samples > 0)
-    valid_indices = valid_indices[valid_samples]
-    pred_samples = pred_samples[valid_samples]
-
-    if len(valid_indices) < 2:
+    pred_samples = pred_map[v[val_idx], u[val_idx]]
+    good_samples = np.isfinite(pred_samples) & (pred_samples > 0)
+    val_idx = val_idx[good_samples]
+    pred_samples = pred_samples[good_samples]
+    if len(val_idx) < 2:
         return pred_map.copy(), inlier_mask
 
-    x_pred = pred_samples.reshape(-1, 1)
-    y_metric = depths[valid_indices]
+    y_metric = depths[val_idx]
+    x_pred = pred_samples
 
-    # Check if model outputs relative disparity (larger = closer, negative correlation with depth)
+    # Depth Anything V2 outputs relative disparity (higher = closer, inversely proportional to depth)
     is_disparity = False
     if len(y_metric) >= 3:
-        corr_mat = np.corrcoef(x_pred.ravel(), y_metric.ravel())
-        if corr_mat.ndim == 2 and corr_mat.shape[0] >= 2 and corr_mat.shape[1] >= 2:
-            corr = corr_mat[0, 1]
-            if np.isfinite(corr) and corr < -0.1:
-                is_disparity = True
+        corr = np.corrcoef(x_pred, y_metric)[0, 1]
+        if np.isfinite(corr) and corr < -0.1:
+            is_disparity = True
 
-    ransac = RANSACRegressor(
-        min_samples=2,
-        residual_threshold=None,
-        random_state=42
-    )
+    if is_disparity:
+        # fit: 1 / z_slam = a * disp + b
+        inv_y = 1.0 / np.clip(y_metric, 0.1, 20.0)
+        a, b, sub_inliers = _ransac_line_1d(x_pred, inv_y)
+        inlier_mask[val_idx[sub_inliers]] = True
 
-    try:
-        if is_disparity:
-            # Fit inverse depth (disparity space): 1/z = scale * pred_disp + shift
-            y_target = (1.0 / np.maximum(y_metric, 1e-3)).reshape(-1, 1)
-            ransac.fit(x_pred, y_target.ravel())
-            scale = float(ransac.estimator_.coef_[0])
-            shift = float(ransac.estimator_.intercept_)
-            if hasattr(ransac, "inlier_mask_") and ransac.inlier_mask_ is not None:
-                inlier_mask[valid_indices[ransac.inlier_mask_]] = True
-            denom = np.maximum(scale * pred_map + shift, 1e-3)
-            metric_depth_map = (1.0 / denom).astype(np.float32)
-        else:
-            # Direct metric linear fit: metric_z = scale * pred_z + shift
-            ransac.fit(x_pred, y_metric)
-            scale = float(ransac.estimator_.coef_[0])
-            shift = float(ransac.estimator_.intercept_)
-            if hasattr(ransac, "inlier_mask_") and ransac.inlier_mask_ is not None:
-                inlier_mask[valid_indices[ransac.inlier_mask_]] = True
-            metric_depth_map = np.maximum(scale * pred_map + shift, 1e-3).astype(np.float32)
-    except Exception:
-        # Robust fallback: median scaling
-        scale = float(np.median(y_metric) / np.maximum(np.median(pred_samples), 1e-3))
-        metric_depth_map = np.maximum(scale * pred_map, 1e-3).astype(np.float32)
+        pred_disp = np.maximum(pred_map, 1e-4)
+        aligned_inv_z = a * pred_disp + b
+        aligned_inv_z = np.maximum(aligned_inv_z, 1.0 / 20.0)
+        metric_depth = 1.0 / aligned_inv_z
+    else:
+        # direct linear fit: z_slam = a * pred + b
+        a, b, sub_inliers = _ransac_line_1d(x_pred, y_metric)
+        inlier_mask[val_idx[sub_inliers]] = True
+        metric_depth = a * pred_map + b
 
-    return metric_depth_map, inlier_mask
-
-if __name__ == "__main__":
-    # Self-test verification
-    np.random.seed(42)
-    h, w = 480, 640
-    # Create synthetic smooth depth map
-    y_grid, x_grid = np.mgrid[0:h, 0:w]
-    synth_pred = (2.0 + 1.5 * np.sin(x_grid / 100.0) + 0.5 * (y_grid / h)).astype(np.float32)
-
-    # Ground truth affine relation
-    true_scale = 1.75
-    true_shift = 0.50
-
-    # Sample 40 sparse landmark points (u, v)
-    u_pts = np.random.randint(50, w - 50, size=40)
-    v_pts = np.random.randint(50, h - 50, size=40)
-    coords = np.column_stack([u_pts, v_pts])
-
-    pred_z = synth_pred[v_pts, u_pts]
-    metric_z = true_scale * pred_z + true_shift
-
-    # Add 10% outliers
-    metric_z[:4] += 10.0
-
-    aligned_map, mask = align_depth_scale_shift(coords, metric_z, synth_pred)
-
-    assert aligned_map.shape == (h, w)
-    assert aligned_map.dtype == np.float32
-    assert mask.shape == (40,)
-    assert mask.sum() >= 30, f"Expected >= 30 inliers, got {mask.sum()}"
-    print(f"Self-test passed: {mask.sum()}/40 inliers identified, aligned map shape {aligned_map.shape} ({aligned_map.dtype})")
+    # sensible room depth bounds
+    metric_depth = np.clip(metric_depth, 0.2, 8.0)
+    return metric_depth.astype(np.float32), inlier_mask

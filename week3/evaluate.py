@@ -138,3 +138,53 @@ def plot_evaluation(
         plt.show()
     else:
         plt.close(fig)
+
+
+def load_tum_trajectory(path: str) -> np.ndarray:
+    coords = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 4:
+                coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    return np.array(coords, dtype=np.float64)
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate trajectory against ground truth")
+    parser.add_argument("--estimated", type=str, required=True, help="Path to estimated trajectory (.txt)")
+    parser.add_argument("--ground-truth", type=str, required=True, help="Path to ground truth trajectory (.txt)")
+    parser.add_argument("--save-plot", type=str, default="slam_evaluation.png", help="Path to save evaluation plot")
+    args = parser.parse_args()
+
+    est = load_tum_trajectory(args.estimated)
+    gt = load_tum_trajectory(args.ground_truth)
+
+    n = min(len(est), len(gt))
+    if n < 5:
+        print(f"Error: Not enough poses to evaluate (est: {len(est)}, gt: {len(gt)})")
+        return
+
+    est = est[:n]
+    gt = gt[:n]
+
+    metrics = compute_ate_metrics(est, gt)
+    print("\n" + "=" * 50)
+    print(" Trajectory Evaluation (Sim(3) Aligned)")
+    print("=" * 50)
+    print(f" ATE RMSE:     {metrics['ate_rmse']:.4f} m")
+    print(f" Mean error:   {metrics['mean_error']:.4f} m")
+    print(f" Median error: {metrics['median_error']:.4f} m")
+    print(f" Max error:    {metrics['max_error']:.4f} m")
+    print(f" Scale factor: {metrics['sim3_scale']:.4f}")
+    print("=" * 50)
+
+    plot_evaluation(est, gt, metrics, save_path=args.save_plot, show=False)
+
+
+if __name__ == "__main__":
+    main()

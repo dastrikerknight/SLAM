@@ -1,6 +1,9 @@
+"""Visual vocabulary (k-means) and inverted index for BoW loop detection."""
+
 from typing import Dict, List, Tuple, Optional, Set
 import numpy as np
 import cv2
+
 
 class VisualVocabulary:
     def __init__(self, num_words: int = 128):
@@ -33,7 +36,7 @@ class VisualVocabulary:
             return np.zeros(self.num_words, dtype=np.float32)
 
         des_f = des.astype(np.float32)
-        # Compute squared Euclidean distance to cluster centers: ||x - c||^2 = ||x||^2 + ||c||^2 - 2 x @ c.T
+        # vectorized ||x - c||^2 without slow loops: x^2 + c^2 - 2xc
         x2 = np.sum(des_f ** 2, axis=1, keepdims=True)
         c2 = np.sum(self.centers ** 2, axis=1, keepdims=True).T
         dist = x2 + c2 - 2.0 * (des_f @ self.centers.T)
@@ -77,7 +80,7 @@ class InvertedIndex:
         exclude = exclude_ids or set()
         nz_words = np.where(query_vec > 1e-4)[0]
 
-        # Gather candidate keyframes sharing at least one visual word
+        # inverted index lookup: only score keyframes that actually share visual words
         candidates: Set[int] = set()
         for w in nz_words:
             candidates.update(self.word_to_kfs[w])
@@ -86,7 +89,7 @@ class InvertedIndex:
         if not candidates:
             return []
 
-        # DBoW L1 scoring: s(v1, v2) = 1 - 0.5 * sum(|v1 - v2|)
+        # standard DBoW2 L1 similarity: 1 - 0.5 * sum(|a - b|)
         scores = []
         for cid in candidates:
             cand_vec = self.kf_vectors[cid]

@@ -9,7 +9,7 @@ Production-grade Visual SLAM system featuring Bag-of-Visual-Words (BoW) loop det
 | **Feature Tracking** | 2D ORB matching | Guided Epipolar Line Search | Hybrid Shi-Tomasi + FAST/ORB + Pyramidal KLT |
 | **Inlier Retention** | Drops to 20-30 pts | 120+ local map inliers | 500-1,300+ inliers with probationary landmark retention |
 | **Loop Closure** | None (open loop) | Covisibility heuristic | **Hierarchical BoW Inverted Index + Sim(3) 7-DoF PGO** |
-| **Long-Horizon Drift** | Severe scale drift | Scale drift accumulates | **Permanently anchored scale (Sim(3) scale $\approx 1.01$)** |
+| **Long-Horizon Drift** | Severe scale drift | Scale drift accumulates | **Permanently anchored scale (Sim(3) scale ~1.01)** |
 | **Relocalization** | None (restart needed) | Heuristic retry | **Fast visual vocabulary relocalization (<50ms)** |
 | **Map Persistence** | None (RAM-only) | None | **Binary map serialization & loading (`map.bin`)** |
 | **3D Reconstruction** | Sparse point cloud | Raw dense point cloud | **Watertight solid triangle meshes (`.obj` / `.ply`) + TSDF** |

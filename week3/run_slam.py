@@ -1,4 +1,4 @@
-"""CLI entrypoint for monocular SLAM: KITTI, TUM, synthetic benchmark, video, webcam."""
+"""CLI runner for monocular visual SLAM: TUM, KITTI, synthetic, video streams."""
 
 import os
 import sys
@@ -7,7 +7,6 @@ import time
 import numpy as np
 import cv2
 
-# Ensure local packages are importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from slam.visual_slam import VisualSLAM
@@ -16,37 +15,38 @@ from datasets.synthetic_dataset import SyntheticDataset
 from datasets.kitti_dataset import KITTIDataset
 from datasets.tum_dataset import TUMDataset
 from datasets.video_dataset import VideoDataset
+from datasets.image_folder_dataset import ImageFolderDataset
 from visualization.viewer_2d import Viewer2D
 from visualization.viewer_3d import Viewer3D
 from evaluate import compute_ate_metrics, plot_evaluation
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Monocular Visual SLAM using OpenCV")
+    parser = argparse.ArgumentParser(description="Monocular Visual SLAM")
     parser.add_argument(
         "--dataset",
         type=str,
         default="synthetic",
         choices=["synthetic", "kitti", "tum", "video", "webcam", "images"],
-        help="Dataset type to run SLAM on (default: synthetic)"
+        help="Dataset loader (default: synthetic)"
     )
     parser.add_argument(
         "--path",
         type=str,
         default=None,
-        help="Path to dataset sequence, image folder, or video file"
+        help="Path to dataset sequence, image directory, or video file"
     )
     parser.add_argument(
         "--fx",
         type=float,
         default=None,
-        help="Optional camera focal length fx in pixels (if known)"
+        help="Camera focal length fx in pixels"
     )
     parser.add_argument(
         "--fy",
         type=float,
         default=None,
-        help="Optional camera focal length fy in pixels (if known)"
+        help="Camera focal length fy in pixels"
     )
     parser.add_argument(
         "--fps",
@@ -58,101 +58,79 @@ def parse_args():
         "--features",
         type=int,
         default=1500,
-        help="Number of ORB features to detect per frame (default: 1500)"
+        help="ORB feature budget per frame (default: 1500)"
     )
     parser.add_argument(
         "--max-frames",
         type=int,
         default=None,
-        help="Maximum number of frames to process"
+        help="Max frames to process"
     )
     parser.add_argument(
         "--no-gui",
         action="store_true",
-        help="Run in headless mode without 2D OpenCV windows"
+        help="Headless mode (no OpenCV 2D viewer)"
     )
     parser.add_argument(
         "--save-plot",
         type=str,
         default="slam_output_3d.png",
-        help="Path to save final 3D reconstruction plot"
+        help="Output path for 3D trajectory/point plot"
     )
     parser.add_argument(
         "--save-ply",
         type=str,
         default=None,
-        help="Optional path to export 3D point cloud as a .ply file (e.g. map.ply)"
+        help="Export 3D point cloud (.ply)"
     )
     parser.add_argument(
         "--save-trajectory",
         type=str,
         default=None,
-        help="Optional path to export estimated trajectory in TUM format (e.g. trajectory.txt)"
+        help="Export camera poses in TUM format (.txt)"
     )
     parser.add_argument(
         "--save-map",
         type=str,
         default=None,
-        help="Optional path to serialize and save binary SLAM map (e.g. map.bin)"
+        help="Serialize binary map (.bin)"
     )
     parser.add_argument(
         "--load-map",
         type=str,
         default=None,
-        help="Optional path to load pre-built binary SLAM map for relocalization"
+        help="Load pre-built binary map for relocalization"
     )
     parser.add_argument(
         "--meshing",
         action="store_true",
-        help="Reconstruct solid 3D triangle surface mesh from map points"
+        help="Triangulate solid surface mesh from map points"
     )
     parser.add_argument(
         "--save-mesh",
         type=str,
         default=None,
-        help="Path to export 3D triangle mesh (e.g. scene_mesh.obj)"
-    )
-    parser.add_argument(
-        "--dense-tsdf",
-        action="store_true",
-        help="Run real-time neural depth estimation & volumetric TSDF mapping"
-    )
-    parser.add_argument(
-        "--tsdf-mesh-out",
-        type=str,
-        default="dense_tsdf_mesh.ply",
-        help="Output path for watertight TSDF mesh (.ply)"
-    )
-    parser.add_argument(
-        "--kf-trans",
-        type=float,
-        default=0.15,
-        help="Translation displacement (m) to trigger a TSDF keyframe (default: 0.15)"
+        help="Output path for surface mesh (.obj)"
     )
     parser.add_argument(
         "--delay",
         type=int,
         default=1,
-        help="Wait delay in ms for OpenCV viewer (1 for max speed, 30 for ~30 FPS)"
+        help="OpenCV window delay in ms (1 = fast, 30 = ~30 fps)"
     )
     return parser.parse_args()
 
 
-from datasets.image_folder_dataset import ImageFolderDataset
-
-
 def load_dataset(args):
-    """Instantiates the appropriate dataset loader."""
     if args.dataset == "synthetic":
-        num_frames = args.max_frames if args.max_frames else 120
-        print(f"[Dataset] Initializing Synthetic 3D Benchmark ({num_frames} frames)...")
-        return SyntheticDataset(num_frames=num_frames)
+        n_frames = args.max_frames if args.max_frames else 120
+        print(f"[Dataset] Synthetic generator ({n_frames} frames)...")
+        return SyntheticDataset(num_frames=n_frames)
 
-    elif args.dataset == "images":
+    if args.dataset == "images":
         if not args.path:
-            print("Error: --path is required for images dataset (e.g. --path /path/to/my_frames/)")
-            sys.exit(1)
-        print(f"[Dataset] Loading image sequence from folder: {args.path}")
+            sys.exit("Error: --path required for image folder dataset")
+        print(f"[Dataset] Image directory: {args.path}")
         return ImageFolderDataset(
             folder_path=args.path,
             fps=args.fps,
@@ -161,45 +139,39 @@ def load_dataset(args):
             max_frames=args.max_frames
         )
 
-    elif args.dataset == "kitti":
+    if args.dataset == "kitti":
         if not args.path:
-            print("Error: --path is required for KITTI dataset (e.g. --path /path/to/sequences/00)")
-            sys.exit(1)
-        print(f"[Dataset] Loading KITTI Odometry dataset from: {args.path}")
+            sys.exit("Error: --path required for KITTI sequence")
+        print(f"[Dataset] KITTI sequence: {args.path}")
         return KITTIDataset(args.path)
 
-    elif args.dataset == "tum":
+    if args.dataset == "tum":
         if not args.path:
-            print("Error: --path is required for TUM dataset (e.g. --path /path/to/rgbd_dataset_freiburg1_xyz)")
-            sys.exit(1)
-        print(f"[Dataset] Loading TUM RGB-D dataset from: {args.path}")
+            sys.exit("Error: --path required for TUM sequence")
+        print(f"[Dataset] TUM sequence: {args.path}")
         return TUMDataset(args.path)
 
-    elif args.dataset == "video":
+    if args.dataset == "video":
         if not args.path:
-            print("Error: --path is required for video file (e.g. --path input.mp4)")
-            sys.exit(1)
-        print(f"[Dataset] Loading video stream from: {args.path}")
+            sys.exit("Error: --path required for video stream")
+        print(f"[Dataset] Video file: {args.path}")
         return VideoDataset(args.path, max_frames=args.max_frames)
 
-    elif args.dataset == "webcam":
-        print("[Dataset] Connecting to live webcam (Device 0)...")
+    if args.dataset == "webcam":
+        print("[Dataset] Connecting to webcam 0...")
         return VideoDataset(0, max_frames=args.max_frames)
 
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset}")
+    raise ValueError(f"Unknown dataset type: {args.dataset}")
 
 
 def main():
     args = parse_args()
 
-    # dataset setup
     dataset = load_dataset(args)
     camera = dataset.get_camera()
     total_frames = len(dataset)
-    print(f"[Camera] Model: {camera}")
+    print(f"[Camera] {camera}")
 
-    # SLAM tracker
     slam = VisualSLAM(
         camera=camera,
         num_features=args.features,
@@ -212,46 +184,44 @@ def main():
         slam.map = Map.load_binary(args.load_map, camera)
         slam.tracking.slam_map = slam.map
         slam.tracking.state = TrackingState.LOST
-        print(f"[Map] Loaded pre-built map ({len(slam.map.keyframes)} keyframes, {len(slam.map.map_points)} points). Operating in relocalization mode.")
+        print(f"[Map] Loaded map ({len(slam.map.keyframes)} KFs, {len(slam.map.map_points)} pts). Relocalizing...")
 
-    if args.dense_tsdf:
-        print("[Notice] For full volumetric TSDF reconstruction, neural depth, and semantic meshing, use: python reconstruct_scene.py")
-
-    # 2D preview
     viewer_2d = None
     if not args.no_gui:
         viewer_2d = Viewer2D(canvas_size=600, scale=12.0)
 
     print("\n" + "=" * 60)
-    print(f" Starting Monocular Visual SLAM (OpenCV {cv2.__version__})")
-    print(f" Total Frames: {total_frames} | Features per frame: {args.features}")
+    print(f" Monocular Visual SLAM (OpenCV {cv2.__version__})")
+    print(f" Frames: {total_frames} | Features: {args.features}")
     if not args.no_gui:
-        print(" Press 'q' or 'ESC' in any OpenCV window to stop early.")
+        print(" Press 'q' or 'ESC' to stop.")
     print("=" * 60 + "\n")
 
-    start_time = time.time()
-    processed_count = 0
+    t_start = time.time()
+    n_processed = 0
     gt_history = []
     est_history = []
 
     try:
-        for frame_id, timestamp, img, gt_pose in dataset:
-            if args.max_frames and processed_count >= args.max_frames:
+        for item in dataset:
+            if len(item) == 5:
+                frame_id, timestamp, img, depth_m, gt_pose = item
+            else:
+                frame_id, timestamp, img, gt_pose = item
+                depth_m = None
+
+            if args.max_frames and n_processed >= args.max_frames:
                 break
 
             t0 = time.time()
-            frame = slam.process_frame(frame_id, timestamp, img)
-            process_duration = time.time() - t0
-            processed_count += 1
+            frame = slam.process_frame(frame_id, timestamp, img, depth=depth_m)
+            dt = time.time() - t0
+            n_processed += 1
 
-            # Collect poses for evaluation if GT is available
             if gt_pose is not None and frame.has_pose:
-                gt_pos = gt_pose[:3, 3]
-                est_pos = frame.get_camera_center()
-                gt_history.append(gt_pos)
-                est_history.append(est_pos)
+                gt_history.append(gt_pose[:3, 3])
+                est_history.append(frame.get_camera_center())
 
-            # Update 2D GUI
             if viewer_2d is not None:
                 key = viewer_2d.draw(
                     frame=frame,
@@ -261,18 +231,13 @@ def main():
                     gt_pose=gt_pose,
                     wait_ms=args.delay
                 )
-                if key == 27 or key == ord('q'):
-                    print("\n[SLAM] User interrupted execution.")
+                if key in (27, ord('q')):
+                    print("\n[SLAM] Interrupted by user.")
                     break
 
-            # Console logging every 10 frames
-            if processed_count % 10 == 0 or processed_count == total_frames:
-                state_str = slam.state.name
-                inliers = slam.num_inliers
-                map_pts = len(slam.map.map_points)
-                kfs = len(slam.map.keyframes)
-                fps = 1.0 / max(process_duration, 1e-4)
-                print(f"[Frame {processed_count:04d}/{total_frames:04d}] State: {state_str:<12} | Inliers: {inliers:3d} | 3D Points: {map_pts:4d} | KeyFrames: {kfs:2d} | Speed: {fps:.1f} FPS")
+            if n_processed % 10 == 0 or n_processed == total_frames:
+                fps = 1.0 / max(dt, 1e-4)
+                print(f"[{n_processed:04d}/{total_frames:04d}] State: {slam.state.name:<12} | Inliers: {slam.num_inliers:3d} | Points: {len(slam.map.map_points):4d} | KFs: {len(slam.map.keyframes):2d} | {fps:5.1f} FPS")
 
     except KeyboardInterrupt:
         print("\n[SLAM] Interrupted by user.")
@@ -281,51 +246,41 @@ def main():
         if viewer_2d is not None:
             viewer_2d.close()
 
-    total_time = time.time() - start_time
-    avg_fps = processed_count / max(total_time, 1e-4)
+    total_dt = time.time() - t_start
+    avg_fps = n_processed / max(total_dt, 1e-4)
 
     print("\n" + "=" * 60)
-    print(" SLAM Execution Summary")
-    print(f" Processed Frames: {processed_count}/{total_frames}")
-    print(f" Total Time:       {total_time:.2f} s")
-    print(f" Average Speed:    {avg_fps:.1f} FPS")
-    print(f" KeyFrames:        {len(slam.map.keyframes)}")
-    print(f" 3D MapPoints:     {len(slam.map.map_points)}")
+    print(" Execution Summary")
+    print(f" Frames:    {n_processed}/{total_frames}")
+    print(f" Time:      {total_dt:.2f} s ({avg_fps:.1f} avg FPS)")
+    print(f" KeyFrames: {len(slam.map.keyframes)}")
+    print(f" Points:    {len(slam.map.map_points)}")
     print("=" * 60)
 
-    # trajectory evaluation (Sim(3) Umeyama alignment & ATE RMSE)
+    # trajectory evaluation vs ground truth
     if len(gt_history) > 10 and len(est_history) > 10:
         gt_arr = np.array(gt_history, dtype=np.float64)
         est_arr = np.array(est_history, dtype=np.float64)
 
         metrics = compute_ate_metrics(est_arr, gt_arr)
         print("\n" + "-" * 60)
-        print(" Benchmark Evaluation (Umeyama Sim(3) Scale-Aligned)")
-        print(f" Absolute Trajectory Error (ATE RMSE): {metrics['ate_rmse']:.4f} m")
-        print(f" Mean Error:                           {metrics['mean_error']:.4f} m")
-        print(f" Median Error:                         {metrics['median_error']:.4f} m")
-        print(f" Max Error:                            {metrics['max_error']:.4f} m")
-        print(f" Estimated Monocular Scale Factor:     {metrics['sim3_scale']:.4f}")
+        print(" Benchmark Evaluation (Umeyama Sim(3))")
+        print(f" ATE RMSE:     {metrics['ate_rmse']:.4f} m")
+        print(f" Mean error:   {metrics['mean_error']:.4f} m")
+        print(f" Median error: {metrics['median_error']:.4f} m")
+        print(f" Scale s:      {metrics['sim3_scale']:.4f}")
         print("-" * 60)
 
-        eval_plot_path = "slam_evaluation.png"
-        plot_evaluation(est_arr, gt_arr, metrics, save_path=eval_plot_path, show=False)
+        plot_evaluation(est_arr, gt_arr, metrics, save_path="slam_evaluation.png", show=False)
 
-    # 5. Export 3D Point Cloud (.ply) and Trajectory (.txt) if requested
-    if args.save_ply:
-        ok = slam.map.export_ply(args.save_ply)
-        if ok:
-            print(f"[Export] Saved 3D point cloud to: {args.save_ply}")
+    if args.save_ply and slam.map.export_ply(args.save_ply):
+        print(f"[Export] Saved point cloud: {args.save_ply}")
 
-    if args.save_trajectory:
-        ok = slam.map.export_tum_trajectory(args.save_trajectory)
-        if ok:
-            print(f"[Export] Saved TUM-format trajectory to: {args.save_trajectory}")
+    if args.save_trajectory and slam.map.export_tum_trajectory(args.save_trajectory):
+        print(f"[Export] Saved TUM trajectory: {args.save_trajectory}")
 
-    if args.save_map:
-        ok = slam.map.save_binary(args.save_map)
-        if ok:
-            print(f"[Export] Saved binary SLAM map to: {args.save_map}")
+    if args.save_map and slam.map.save_binary(args.save_map):
+        print(f"[Export] Saved binary map: {args.save_map}")
 
     if args.meshing or args.save_mesh:
         out_mesh = args.save_mesh or "scene_mesh.obj"
@@ -335,14 +290,12 @@ def main():
             from surface_meshing import reconstruct_surface_mesh, export_obj
             v, faces, c, normals = reconstruct_surface_mesh(pts, cols, max_edge_length=0.15)
             export_obj(out_mesh, v, faces, c, normals)
-            print(f"[Export] Reconstructed solid 3D surface mesh ({len(v)} vertices, {len(faces)} faces) -> {out_mesh}")
+            print(f"[Export] Saved surface mesh ({len(v)} vertices, {len(faces)} faces) -> {out_mesh}")
 
-    # 6. 3D Map & Trajectory Visualization
-    gt_centers = dataset.get_all_groundtruth_centers()
     viewer_3d = Viewer3D()
     viewer_3d.plot_slam_results(
         slam_map=slam.map,
-        gt_centers=gt_centers,
+        gt_centers=dataset.get_all_groundtruth_centers(),
         save_path=args.save_plot,
         show=not args.no_gui
     )

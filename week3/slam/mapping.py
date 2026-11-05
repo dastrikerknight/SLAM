@@ -1,8 +1,4 @@
-"""
-Local Mapping module for Monocular Visual SLAM.
-Handles triangulation of new 3D points between keyframes, map point fusion,
-culling of redundant points, and throttled local bundle adjustment.
-"""
+"""Local mapping: triangulate points between keyframes, fuse covisible points, run local BA."""
 
 from typing import List, Tuple
 import numpy as np
@@ -33,27 +29,19 @@ class LocalMapping:
         self.kf_counter = 0
 
     def process_new_keyframe(self, current_kf: Frame, slam_map: Map) -> int:
-        """
-        Integrates a newly inserted keyframe:
-        1. Triangulates new 3D points with recent keyframes.
-        2. Detects covisibility loops with earlier keyframes and fuses duplicate MapPoints.
-        3. Prunes low-quality points.
-        4. Runs throttled local bundle adjustment.
-        Returns number of newly triangulated map points.
-        """
         self.kf_counter += 1
         all_kfs = list(slam_map.keyframes.values())
         if len(all_kfs) < 2:
             return 0
 
-        # In monocular mode, triangulate with previous 1-2 keyframes
+        # in monocular mode, triangulate against last 1-2 keyframes
         new_points_count = 0
         if current_kf.depth is None:
             new_points_count += self.triangulate_with_keyframe(all_kfs[-2], current_kf, slam_map)
             if len(all_kfs) >= 3:
                 new_points_count += self.triangulate_with_keyframe(all_kfs[-3], current_kf, slam_map)
 
-        # Covisibility fusion & loop association with earlier keyframes (distance >= 30 keyframes)
+        # fuse covisible points if trajectory loops back near an old keyframe
         if len(all_kfs) > 35:
             curr_pos = current_kf.get_camera_center()
             curr_rot = current_kf.get_rotation()
@@ -70,16 +58,16 @@ class LocalMapping:
                         self.fuse_covisible_keyframes(old_kf, current_kf, slam_map)
                         break
 
-        # Cull bad map points (with grace period for recent keyframe additions)
+        # drop points that failed tracking support (young points get a 3-frame grace period)
         slam_map.cull_map_points(min_observations=2, current_kf_id=current_kf.id)
 
-        # Bag of Visual Words Loop Closing + Pose Graph Optimization
+        # BoW loop closing + pose graph optimization
         loop_res = self.loop_closing.process_keyframe(current_kf, slam_map)
         if loop_res is not None:
             kid1, kid2 = loop_res
             print(f"[Loop] Closed loop between KeyFrame {kid1} and {kid2}! Pose graph optimized.")
 
-        # Run local bundle adjustment in monocular mode
+        # run local BA every 3rd keyframe to avoid stalling tracking
         if current_kf.depth is None and len(slam_map.keyframes) >= 3 and (self.kf_counter % 3 == 0):
             self.optimizer.optimize(slam_map, self.camera)
 
@@ -91,10 +79,6 @@ class LocalMapping:
         curr_kf: Frame,
         slam_map: Map
     ) -> int:
-        """
-        Associates and fuses MapPoints between an earlier covisible keyframe and current keyframe.
-        Eliminates duplicate 3D landmarks and binds the trajectory across loops with epipolar verification.
-        """
         if old_kf.des is None or curr_kf.des is None or len(old_kf.des) < 20 or len(curr_kf.des) < 20:
             return 0
 
@@ -102,7 +86,6 @@ class LocalMapping:
         if len(matches) < 15:
             return 0
 
-        # Epipolar line verification
         R1, t1 = old_kf.get_rotation(), old_kf.get_translation()
         R2, t2 = curr_kf.get_rotation(), curr_kf.get_translation()
         R12 = R2 @ R1.T
@@ -154,16 +137,12 @@ class LocalMapping:
         kf2: Frame,
         slam_map: Map
     ) -> int:
-        """
-        Matches unmatched keypoints between kf1 and kf2, and triangulates new 3D points.
-        """
         unmatched_idx1 = [i for i, mp in enumerate(kf1.map_points) if mp is None or mp.is_bad]
         unmatched_idx2 = [i for i, mp in enumerate(kf2.map_points) if mp is None or mp.is_bad]
 
         if len(unmatched_idx1) < 10 or len(unmatched_idx2) < 10:
             return 0
 
-        # Guided Epipolar Search between keyframes
         R1, t1 = kf1.get_rotation(), kf1.get_translation()
         R2, t2 = kf2.get_rotation(), kf2.get_translation()
 
@@ -173,7 +152,7 @@ class LocalMapping:
 
         matched_pairs = []
 
-        # If baseline is sufficient (>= 1 cm), execute guided epipolar line search
+        # search along epipolar lines if baseline is big enough (>1cm) to constrain search
         if baseline >= 0.01:
             tx = np.array([
                 [0.0, -t12[2], t12[1]],
@@ -229,7 +208,7 @@ class LocalMapping:
                         matched_pairs.append((unmatched_idx1[i1], unmatched_idx2[best_cand]))
                         matched_i2.add(best_cand)
 
-        # Fallback to standard 2D matching if epipolar finds few correspondences
+        # fallback to standard ratio test if epipolar geometry gave too few matches
         if len(matched_pairs) < 10:
             des1 = kf1.des[unmatched_idx1]
             des2 = kf2.des[unmatched_idx2]

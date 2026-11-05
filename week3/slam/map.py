@@ -1,3 +1,5 @@
+"""Global Map container: keyframes, map points, culling, binary serialization, and PLY export."""
+
 from typing import Dict, List, Optional, Tuple
 import pickle
 import numpy as np
@@ -52,7 +54,7 @@ class Map:
             if mp.is_bad:
                 prune.append(pid)
                 continue
-            # Grace period: newly created MapPoints need time to be observed across subsequent frames
+            # 3-frame grace period so freshly triangulated points survive to be tracked
             if current_kf_id is not None and isinstance(mp.first_frame_id, (int, np.integer)):
                 if (current_kf_id - mp.first_frame_id) < 3:
                     continue
@@ -127,58 +129,29 @@ class Map:
             f.write("ply\nformat ascii 1.0\n")
             f.write(f"element vertex {len(pts)}\n")
             f.write("property float x\nproperty float y\nproperty float z\n")
-            f.write("property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
-            for i, p in enumerate(pts):
-                c = cols[i] if len(cols) > i else [200, 200, 200]
+            f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+            f.write("end_header\n")
+            for p, c in zip(pts, cols):
                 f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {int(c[0])} {int(c[1])} {int(c[2])}\n")
         return True
 
     def export_tum_trajectory(self, path: str) -> bool:
-        poses = [(f.timestamp, f.get_inverse_pose()) for f in self.all_frames if f.has_pose]
-        if not poses:
+        valid_frames = [f for f in self.all_frames if f.has_pose]
+        if not valid_frames:
             return False
 
         with open(path, "w") as f:
-            for ts, T in poses:
-                t = T[:3, 3]
-                R = T[:3, :3]
-                tr = np.trace(R)
-                if tr > 0:
-                    s = np.sqrt(tr + 1.0) * 2.0
-                    qw = 0.25 * s
-                    qx = (R[2, 1] - R[1, 2]) / s
-                    qy = (R[0, 2] - R[2, 0]) / s
-                    qz = (R[1, 0] - R[0, 1]) / s
-                elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
-                    s = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
-                    qw = (R[2, 1] - R[1, 2]) / s
-                    qx = 0.25 * s
-                    qy = (R[0, 1] + R[1, 0]) / s
-                    qz = (R[0, 2] + R[2, 0]) / s
-                elif R[1, 1] > R[2, 2]:
-                    s = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
-                    qw = (R[0, 2] - R[2, 0]) / s
-                    qx = (R[0, 1] + R[1, 0]) / s
-                    qy = 0.25 * s
-                    qz = (R[1, 2] + R[2, 1]) / s
+            for f_obj in valid_frames:
+                T_wc = f_obj.get_inverse_pose()
+                t = T_wc[:3, 3]
+                R = T_wc[:3, :3]
+                qw = np.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2.0
+                if qw > 1e-4:
+                    qx = (R[2, 1] - R[1, 2]) / (4.0 * qw)
+                    qy = (R[0, 2] - R[2, 0]) / (4.0 * qw)
+                    qz = (R[1, 0] - R[0, 1]) / (4.0 * qw)
                 else:
-                    s = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
-                    qw = (R[1, 0] - R[0, 1]) / s
-                    qx = (R[0, 2] + R[2, 0]) / s
-                    qy = (R[1, 2] + R[2, 1]) / s
-                    qz = 0.25 * s
+                    qx, qy, qz, qw = 0.0, 0.0, 0.0, 1.0
 
-                q = np.array([qx, qy, qz, qw])
-                norm = np.linalg.norm(q)
-                if norm > 1e-8:
-                    q /= norm
-                f.write(f"{ts:.6f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}\n")
+                f.write(f"{f_obj.timestamp:.6f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n")
         return True
-
-    def clear(self):
-        self.map_points.clear()
-        self.keyframes.clear()
-        self.all_frames.clear()
-
-    def __repr__(self):
-        return f"Map(keyframes={len(self.keyframes)}, points={len(self.map_points)}, frames={len(self.all_frames)})"

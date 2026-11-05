@@ -4,6 +4,7 @@ from typing import Tuple, Optional
 import numpy as np
 from scipy.spatial import cKDTree, Delaunay
 
+
 def estimate_normals(points: np.ndarray, k: int = 15, view_dir: Optional[np.ndarray] = None) -> np.ndarray:
     tree = cKDTree(points)
     _, idxs = tree.query(points, k=k)
@@ -15,7 +16,7 @@ def estimate_normals(points: np.ndarray, k: int = 15, view_dir: Optional[np.ndar
         eigvals, eigvecs = np.linalg.eigh(cov)
         normal = eigvecs[:, 0]
 
-        # Orient normals towards camera view direction if given, else towards origin
+        # orient toward camera or world origin
         v = view_dir[i] if view_dir is not None else -points[i]
         if np.dot(normal, v) < 0:
             normal = -normal
@@ -25,51 +26,51 @@ def estimate_normals(points: np.ndarray, k: int = 15, view_dir: Optional[np.ndar
     norms[norms < 1e-8] = 1.0
     return normals / norms
 
+
 def reconstruct_surface_mesh(
     points: np.ndarray,
     colors: np.ndarray,
     max_edge_length: float = 0.12
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if len(points) < 4:
-        raise ValueError("Insufficient points for meshing")
+        raise ValueError("Need at least 4 points to triangulate")
 
-    # Project to 2D using PCA dominant plane for Delaunay meshing
+    # project to dominant plane via PCA for Delaunay
     pts_mean = points.mean(axis=0)
     cov = np.cov((points - pts_mean).T)
     _, eigvecs = np.linalg.eigh(cov)
-    proj_axes = eigvecs[:, 1:3]
-    pts_2d = (points - pts_mean) @ proj_axes
+    pts_2d = (points - pts_mean) @ eigvecs[:, 1:3]
 
     tri = Delaunay(pts_2d)
-    simplices = tri.simplices
+    faces = tri.simplices
 
-    # Filter out long skinny triangles that jump across empty space
-    v0, v1, v2 = points[simplices[:, 0]], points[simplices[:, 1]], points[simplices[:, 2]]
+    # drop sliver triangles bridging holes/free space
+    v0, v1, v2 = points[faces[:, 0]], points[faces[:, 1]], points[faces[:, 2]]
     d01 = np.linalg.norm(v0 - v1, axis=1)
     d12 = np.linalg.norm(v1 - v2, axis=1)
     d20 = np.linalg.norm(v2 - v0, axis=1)
 
-    valid_mask = (d01 < max_edge_length) & (d12 < max_edge_length) & (d20 < max_edge_length)
-    filtered_faces = simplices[valid_mask]
+    valid = (d01 < max_edge_length) & (d12 < max_edge_length) & (d20 < max_edge_length)
+    filtered = faces[valid]
 
     normals = estimate_normals(points, k=15)
-    return points, filtered_faces, colors, normals
+    return points, filtered, colors, normals
+
 
 def export_obj(path: str, vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray, normals: np.ndarray):
     with open(path, "w") as f:
-        f.write("# Monocular SLAM Week 3 Surface Reconstruction\n")
-        f.write(f"# Vertices: {len(vertices)}, Faces: {len(faces)}\n\n")
+        f.write("# SLAM mesh export\n")
+        f.write(f"# v={len(vertices)} f={len(faces)}\n\n")
 
-        # Vertex positions with RGB colors [0..1]
-        for i, (v, c) in enumerate(zip(vertices, colors)):
+        for v, c in zip(vertices, colors):
             f.write(f"v {v[0]:.4f} {v[1]:.4f} {v[2]:.4f} {c[0]/255.0:.3f} {c[1]/255.0:.3f} {c[2]/255.0:.3f}\n")
 
         for vn in normals:
             f.write(f"vn {vn[0]:.4f} {vn[1]:.4f} {vn[2]:.4f}\n")
 
-        # Faces (1-indexed in OBJ format)
         for face in faces:
             f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
+
 
 def export_ply_mesh(path: str, vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray):
     with open(path, "w") as f:
@@ -86,14 +87,14 @@ def export_ply_mesh(path: str, vertices: np.ndarray, faces: np.ndarray, colors: 
         for face in faces:
             f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
 
+
 def main():
-    parser = argparse.ArgumentParser(description="3D Watertight Surface Mesh Reconstruction")
+    parser = argparse.ArgumentParser(description="3D surface mesher")
     parser.add_argument("--input-ply", type=str, required=True, help="Input point cloud (.ply)")
     parser.add_argument("--output-obj", type=str, default="reconstructed_mesh.obj", help="Output .obj mesh")
-    parser.add_argument("--max-edge", type=float, default=0.10, help="Max triangle edge length in meters")
+    parser.add_argument("--max-edge", type=float, default=0.10, help="Max edge len in meters")
     args = parser.parse_args()
 
-    # Load input point cloud
     pts, cols = [], []
     with open(args.input_ply, "r", encoding="ascii", errors="ignore") as f:
         in_header = True
@@ -110,12 +111,13 @@ def main():
     pts_arr = np.array(pts, dtype=np.float64)
     cols_arr = np.array(cols, dtype=np.uint8)
 
-    print(f"Loaded {len(pts_arr):,} points. Reconstructing solid 3D triangle mesh...")
+    print(f"Loaded {len(pts_arr):,} points. Triangulating...")
     v, faces, c, normals = reconstruct_surface_mesh(pts_arr, cols_arr, max_edge_length=args.max_edge)
-    print(f"Mesh generated: {len(v):,} vertices, {len(faces):,} triangle faces.")
+    print(f"Generated mesh: {len(v):,} vertices, {len(faces):,} faces.")
 
     export_obj(args.output_obj, v, faces, c, normals)
-    print(f"Saved OBJ mesh to: {args.output_obj}")
+    print(f"Saved: {args.output_obj}")
+
 
 if __name__ == "__main__":
     main()

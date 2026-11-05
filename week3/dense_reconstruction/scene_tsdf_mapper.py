@@ -3,9 +3,8 @@ import numpy as np
 import cv2
 import open3d as o3d
 
-class SceneTSDFMapper:
-    """Volumetric TSDF fusion engine for dense, watertight 3D scene reconstruction."""
 
+class SceneTSDFMapper:
     def __init__(
         self,
         volume_type: str = "uniform",
@@ -20,7 +19,7 @@ class SceneTSDFMapper:
         self.sdf_trunc = sdf_trunc
 
         if volume_type == "uniform":
-            # Origin centered horizontally (-2m to +2m), starting slightly behind camera (-0.5m)
+            # start 0.6m behind cam to catch geometry right at the starting line
             origin = np.array([-room_length / 2.0, -room_length / 2.0, -0.6], dtype=np.float64)
             self.volume = o3d.pipelines.integration.UniformTSDFVolume(
                 length=room_length,
@@ -39,7 +38,7 @@ class SceneTSDFMapper:
         self.integrated_frames = 0
 
     def clean_depth_edges(self, depth_map: np.ndarray, max_grad: float = 0.15) -> np.ndarray:
-        """Filters out flying edge pixels at depth silhouettes where gradient spikes."""
+        # kill flying pixels at depth edges so we don't get rubber-sheet bridges across occlusions
         cleaned = depth_map.copy()
         valid = cleaned > 0.1
         if not np.any(valid):
@@ -47,10 +46,9 @@ class SceneTSDFMapper:
 
         gx = cv2.Sobel(cleaned, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(cleaned, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(gx**2 + gy**2)
+        grad = np.sqrt(gx**2 + gy**2)
 
-        # Invalidate pixels with extreme depth discontinuity (flying pixels)
-        cleaned[(grad_mag > max_grad) & valid] = 0.0
+        cleaned[(grad > max_grad) & valid] = 0.0
         return cleaned
 
     def integrate_keyframe(
@@ -60,11 +58,9 @@ class SceneTSDFMapper:
         intrinsic_matrix: Union[np.ndarray, o3d.camera.PinholeCameraIntrinsic],
         pose_c2w: np.ndarray
     ) -> None:
-        """Fuses a calibrated keyframe RGB-D pair into the TSDF volume."""
         h, w = metric_depth.shape[:2]
         color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB) if color_bgr.ndim == 3 and color_bgr.shape[2] == 3 else color_bgr
 
-        # Edge discontinuity filtering to prevent surface stretching
         filtered_depth = self.clean_depth_edges(metric_depth)
 
         color_o3d = o3d.geometry.Image(np.ascontiguousarray(color_rgb, dtype=np.uint8))
@@ -98,28 +94,27 @@ class SceneTSDFMapper:
         min_cluster_faces: int = 150,
         smooth_iterations: int = 5
     ) -> o3d.geometry.TriangleMesh:
-        """Extracts zero-crossing Marching Cubes mesh, strips floating islands, and smooths normals."""
         mesh = self.volume.extract_triangle_mesh()
         if len(mesh.vertices) == 0:
             return mesh
 
         mesh.compute_vertex_normals()
 
-        # Prune small disconnected floating fragments if any
+        # toss small disconnected floating specks
         if min_cluster_faces > 0 and len(mesh.triangles) > min_cluster_faces * 2:
             try:
-                triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
-                triangle_clusters = np.asarray(triangle_clusters)
-                cluster_n_triangles = np.asarray(cluster_n_triangles)
+                clusters, n_tris, _ = mesh.cluster_connected_triangles()
+                clusters = np.asarray(clusters)
+                n_tris = np.asarray(n_tris)
 
-                valid_cluster_mask = cluster_n_triangles >= min_cluster_faces
-                triangles_to_keep = valid_cluster_mask[triangle_clusters]
-                mesh.remove_triangles_by_mask(~triangles_to_keep)
+                keep_mask = n_tris >= min_cluster_faces
+                tris_to_keep = keep_mask[clusters]
+                mesh.remove_triangles_by_mask(~tris_to_keep)
                 mesh.remove_unreferenced_vertices()
             except Exception:
                 pass
 
-        # Taubin smoothing: eliminates voxel discretization staircases without shrinking geometry
+        # taubin smoothing keeps volume while rounding off voxel staircasing
         if smooth_iterations > 0 and len(mesh.vertices) > 0:
             mesh = mesh.filter_smooth_taubin(number_of_iterations=smooth_iterations)
             mesh.compute_vertex_normals()
@@ -134,6 +129,7 @@ class SceneTSDFMapper:
             return True
         return False
 
+
 if __name__ == "__main__":
     mapper = SceneTSDFMapper(volume_type="uniform", room_length=4.0, resolution=128)
     dummy_bgr = np.full((240, 320, 3), 180, dtype=np.uint8)
@@ -142,5 +138,5 @@ if __name__ == "__main__":
 
     mapper.integrate_keyframe(dummy_bgr, dummy_depth, K, np.eye(4))
     m = mapper.extract_clean_mesh(min_cluster_faces=10)
-    assert len(m.vertices) > 0, "Marching cubes should extract mesh vertices"
-    print(f"SceneTSDFMapper verified: extracted {len(m.vertices)} vertices, {len(m.triangles)} triangles")
+    assert len(m.vertices) > 0
+    print(f"TSDF ok: {len(m.vertices)} verts, {len(m.triangles)} tris")

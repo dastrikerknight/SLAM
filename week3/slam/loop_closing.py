@@ -1,3 +1,5 @@
+"""Loop closing: BoW candidate retrieval, PnP verification, and Pose Graph Optimization."""
+
 from typing import Dict, List, Tuple, Optional, Set
 import numpy as np
 import cv2
@@ -8,6 +10,7 @@ from slam.map_point import MapPoint
 from slam.camera import Camera
 from slam.bow_vocabulary import VisualVocabulary, InvertedIndex
 from slam.pose_graph import PoseGraphOptimizer
+
 
 class LoopClosing:
     def __init__(
@@ -33,11 +36,11 @@ class LoopClosing:
         if curr_kf.des is None or len(curr_kf.des) < 20:
             return None
 
-        # Refractory cooldown: prevent repeated pose graph thrashing within 40 keyframes
+        # cooldown: don't thrash PGO on the same turn repeatedly
         if (curr_kf.id - self.last_loop_kf_id) < 40:
             return None
 
-        # Train vocabulary on the fly using initial keyframes if not trained
+        # train vocabulary on the fly from initial keyframe descriptors
         if not self.vocab.is_trained():
             des_pool = [kf.des for kf in slam_map.keyframes.values() if kf.des is not None]
             if len(des_pool) >= 4:
@@ -48,7 +51,7 @@ class LoopClosing:
         bow_vec = self.vocab.transform(curr_kf.des)
         self.index.add_keyframe(curr_kf.id, bow_vec)
 
-        # Exclude recent keyframes to only detect actual loops
+        # ignore recent keyframes so we only trigger on actual revisited areas
         exclude_ids = {kf.id for kf in slam_map.keyframes.values() if abs(curr_kf.id - kf.id) < self.min_time_diff}
         candidates = self.index.query(bow_vec, min_score=self.min_bow_score, exclude_ids=exclude_ids, top_k=3)
         if not candidates:
@@ -62,21 +65,20 @@ class LoopClosing:
             if cand_kf is None or cand_kf.des is None:
                 continue
 
-            # Verify loop geometrically
             success, T_rel, inliers = self._verify_loop(curr_kf, cand_kf)
             if success:
                 self.closed_pairs.add((curr_kf.id, cand_id))
                 self.loop_edges.append((curr_kf.id, cand_id, T_rel, 3.0))
                 self.last_loop_kf_id = curr_kf.id
 
-                # Run Pose Graph Optimization to distribute loop closure drift
+                # distribute accumulated drift across all keyframes and map points
                 self._apply_loop_closure(curr_kf, cand_kf, slam_map, inliers)
                 return (curr_kf.id, cand_id)
 
         return None
 
     def _verify_loop(self, kf1: Frame, kf2: Frame) -> Tuple[bool, Optional[np.ndarray], List[Tuple[int, int]]]:
-        # Match ORB descriptors with Lowe's ratio test
+        # Lowe's ratio test: 0.7 filters out repetitive clutter
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         knn = bf.knnMatch(kf1.des, kf2.des, k=2)
         matches = [m[0] for m in knn if len(m) == 2 and m[0].distance < 0.70 * m[1].distance]
@@ -100,7 +102,6 @@ class LoopClosing:
         pts2_3d_arr = np.array(pts2_3d, dtype=np.float64)
         pts1_2d_arr = np.array(pts1_2d, dtype=np.float32)
 
-        # Robust PnP-RANSAC geometric verification against camera intrinsics
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
             pts2_3d_arr,
             pts1_2d_arr,
@@ -118,7 +119,6 @@ class LoopClosing:
         T_c1_w[:3, :3] = R_c1_w
         T_c1_w[:3, 3] = tvec.ravel()
 
-        # Relative camera pose: T_rel = T_c2_w @ inv(T_c1_w)
         T_rel = kf2.pose @ np.linalg.inv(T_c1_w)
         inlier_indices = set(inliers.flatten())
         verified_pairs = [matched_pairs[i] for i in range(len(matched_pairs)) if i in inlier_indices]
@@ -129,27 +129,24 @@ class LoopClosing:
         old_poses = {kid: kf.pose.copy() for kid, kf in slam_map.keyframes.items()}
         new_poses = self.pgo.optimize(old_poses, self.loop_edges)
 
-        # Update all keyframe poses
         for kid, T_new in new_poses.items():
             kf = slam_map.keyframes.get(kid)
             if kf is not None:
                 kf.set_pose(T_new)
 
-        # Propagate pose correction to 3D map points
+        # warp points into updated coordinates using ref keyframe delta
         for pid, mp in slam_map.map_points.items():
             if mp.is_bad or not mp.observations:
                 continue
             ref_kid = next(iter(mp.observations.keys()))
             if ref_kid in old_poses and ref_kid in new_poses:
-                # Delta transformation: T_new @ inv(T_old) in world frame
                 T_old = old_poses[ref_kid]
                 T_new = new_poses[ref_kid]
-                # In camera coordinates, point was p_c = T_old @ p_w -> p_w_new = inv(T_new) @ p_c
                 p_c = T_old[:3, :3] @ mp.point_3d + T_old[:3, 3]
                 p_w_new = np.linalg.inv(T_new[:3, :3]) @ (p_c - T_new[:3, 3])
                 mp.set_position(p_w_new)
 
-        # Fuse redundant landmarks identified during loop geometric verification
+        # merge duplicate landmarks from the two viewpoints
         for id1, id2 in point_matches:
             mp1 = slam_map.map_points.get(id1)
             mp2 = slam_map.map_points.get(id2)
