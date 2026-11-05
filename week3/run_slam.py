@@ -1,8 +1,4 @@
-"""
-Main CLI entry point for Monocular Visual SLAM using OpenCV.
-Supports running on KITTI Odometry, TUM RGB-D, synthetic benchmarks, video files, and webcams.
-Computes real-time tracking, 3D point cloud mapping, and trajectory evaluation.
-"""
+"""CLI entrypoint for monocular SLAM: KITTI, TUM, synthetic benchmark, video, webcam."""
 
 import os
 import sys
@@ -197,13 +193,13 @@ def load_dataset(args):
 def main():
     args = parse_args()
 
-    # 1. Initialize Dataset
+    # dataset setup
     dataset = load_dataset(args)
     camera = dataset.get_camera()
     total_frames = len(dataset)
     print(f"[Camera] Model: {camera}")
 
-    # 2. Initialize Visual SLAM
+    # SLAM tracker
     slam = VisualSLAM(
         camera=camera,
         num_features=args.features,
@@ -218,13 +214,10 @@ def main():
         slam.tracking.state = TrackingState.LOST
         print(f"[Map] Loaded pre-built map ({len(slam.map.keyframes)} keyframes, {len(slam.map.map_points)} points). Operating in relocalization mode.")
 
-    kf_manager = None
     if args.dense_tsdf:
-        from keyframe_manager import KeyframeManager
-        kf_manager = KeyframeManager(translation_threshold=args.kf_trans)
-        print(f"[TSDF] Initialized asynchronous KeyframeManager (trigger delta={args.kf_trans:.2f}m)")
+        print("[Notice] For full volumetric TSDF reconstruction, neural depth, and semantic meshing, use: python reconstruct_scene.py")
 
-    # 3. Initialize Visualizer
+    # 2D preview
     viewer_2d = None
     if not args.no_gui:
         viewer_2d = Viewer2D(canvas_size=600, scale=12.0)
@@ -249,10 +242,6 @@ def main():
             t0 = time.time()
             frame = slam.process_frame(frame_id, timestamp, img)
             process_duration = time.time() - t0
-
-            if kf_manager is not None:
-                kf_manager.process_frame(frame, slam.map)
-
             processed_count += 1
 
             # Collect poses for evaluation if GT is available
@@ -304,7 +293,7 @@ def main():
     print(f" 3D MapPoints:     {len(slam.map.map_points)}")
     print("=" * 60)
 
-    # 4. Trajectory Evaluation (Sim(3) Alignment & ATE RMSE)
+    # trajectory evaluation (Sim(3) Umeyama alignment & ATE RMSE)
     if len(gt_history) > 10 and len(est_history) > 10:
         gt_arr = np.array(gt_history, dtype=np.float64)
         est_arr = np.array(est_history, dtype=np.float64)
@@ -337,10 +326,6 @@ def main():
         ok = slam.map.save_binary(args.save_map)
         if ok:
             print(f"[Export] Saved binary SLAM map to: {args.save_map}")
-
-    if kf_manager is not None:
-        kf_manager.finalize(args.tsdf_mesh_out)
-        kf_manager.stop()
 
     if args.meshing or args.save_mesh:
         out_mesh = args.save_mesh or "scene_mesh.obj"
